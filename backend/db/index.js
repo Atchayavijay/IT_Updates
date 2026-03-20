@@ -11,6 +11,9 @@ const toNullableDate = (val) => (val === '' || val === undefined ? null : val);
 const { Pool } = pg;
 
 let pool = null;
+// Tracks whether Postgres is actually reachable (set by testConnection on startup).
+// This avoids "env is set but DB is unreachable" causing hard 401 login failures.
+let dbAvailability = null;
 
 function getConnectionString() {
   if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
@@ -38,6 +41,7 @@ export function getPool() {
 }
 
 export function useDb() {
+  if (dbAvailability !== null) return dbAvailability;
   return Boolean(getConnectionString());
 }
 
@@ -243,8 +247,10 @@ export async function testConnection() {
     const user = process.env.DB_USER;
     const database = process.env.DB_DATABASE;
     if (!user || !database) {
+      dbAvailability = false;
       return { ok: false, error: 'Missing DB_USER or DB_DATABASE in .env' };
     }
+    dbAvailability = false;
     return { ok: false, error: 'Could not create pool (check .env)' };
   }
   try {
@@ -253,8 +259,10 @@ export async function testConnection() {
     client.release();
     // Also ensure requirements table
     await dbEnsureTables();
+    dbAvailability = true;
     return { ok: true };
   } catch (err) {
+    dbAvailability = false;
     return { ok: false, error: err.message };
   }
 }

@@ -17,11 +17,40 @@ const COOKIE_OPTS = { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'https://status-track.netlify.app';
+/**
+ * `cors` does an exact string match for `Origin`.
+ * If `CLIENT_ORIGIN` contains a trailing `/`, browsers send without it, so CORS breaks.
+ * Also allow multiple origins separated by commas.
+ */
+function normalizeOrigin(value) {
+  if (value == null) return '';
+  const s = String(value).trim();
+  if (!s) return '';
+  return s.replace(/\/+$/, '');
+}
+
+function getAllowedOrigins() {
+  const raw = process.env.CLIENT_ORIGIN || 'https://status-track.netlify.app';
+  return raw
+    .split(',')
+    .map((part) => normalizeOrigin(part))
+    .filter(Boolean);
+}
+
+const allowedOrigins = getAllowedOrigins();
 
 app.use(
   cors({
-    origin: CLIENT_ORIGIN,
+    origin(origin, callback) {
+      // Non-browser requests may not have an Origin header.
+      if (!origin) return callback(null, true);
+
+      const normalized = normalizeOrigin(origin);
+      if (allowedOrigins.includes(normalized)) return callback(null, true);
+
+      console.warn('CORS rejected Origin:', origin, '| allowed:', allowedOrigins.join(', '));
+      callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
   })
 );
