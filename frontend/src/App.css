@@ -276,3 +276,34 @@
     font-size: 1.4rem;
   }
 }
+
+/* Session bootstrap (before login vs app) */
+.auth-bootstrap .auth-bootstrap-inner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  color: var(--clr-slate-300);
+}
+
+.auth-bootstrap-text {
+  font-size: 0.9rem;
+  color: var(--clr-slate-400);
+}
+
+.auth-bootstrap-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(148, 163, 184, 0.25);
+  border-top-color: var(--clr-primary-500);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

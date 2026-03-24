@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import MainLayout from './components/MainLayout';
 import authApi from './api/authApi';
 import logoSrc from './assets/logo.png';
@@ -94,14 +94,38 @@ const LoginPage = ({ onLogin }) => {
 };
 
 function App() {
-  const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem('user');
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [user, setUser] = useState(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await authApi.me();
+        if (!cancelled && data?.user) {
+          setUser(data.user);
+          localStorage.setItem('user', JSON.stringify(data.user));
+        }
+      } catch {
+        if (!cancelled) {
+          setUser(null);
+          localStorage.removeItem('user');
+          localStorage.removeItem('username');
+          localStorage.removeItem('profile_image');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onSessionExpired = () => {
+      setUser(null);
+    };
+    window.addEventListener('auth:session-expired', onSessionExpired);
+    return () => window.removeEventListener('auth:session-expired', onSessionExpired);
+  }, []);
 
   const handleLogin = (userData) => {
     setUser(userData);
@@ -112,6 +136,18 @@ function App() {
     setUser(null);
     localStorage.removeItem('user');
   };
+
+  if (user === undefined) {
+    return (
+      <div className="auth-root auth-bootstrap" role="status" aria-live="polite">
+        <div className="auth-grid-overlay" />
+        <div className="auth-bootstrap-inner">
+          <span className="auth-bootstrap-spinner" aria-hidden />
+          <span className="auth-bootstrap-text">Checking your session…</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!user) {
     return <LoginPage onLogin={handleLogin} />;

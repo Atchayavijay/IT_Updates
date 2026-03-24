@@ -248,10 +248,11 @@ export default function DigitalMarketingMain({ currentUser, onLogout }) {
           );
         }
       }
-      closeTaskModal();
       loadMyTasks();
+      return true;
     } catch (e) {
       setError(e?.response?.data?.message || 'Failed to save task');
+      return false;
     }
   };
 
@@ -796,6 +797,7 @@ function TaskModal({ task, onClose, onSave, onRefresh, teamMembers, assignedByOp
   });
 
   const isExistingTask = Boolean(task?.id);
+  const [saveState, setSaveState] = useState({ saving: false, saved: false });
 
   useEffect(() => {
     if (isExistingTask) {
@@ -901,13 +903,28 @@ function TaskModal({ task, onClose, onSave, onRefresh, teamMembers, assignedByOp
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    onSave({
-      ...form,
-      requirements,
-      due_date: form.due_date || undefined,
-    });
+    if (saveState.saving) return;
+
+    setSaveState({ saving: true, saved: false });
+    let ok = false;
+    try {
+      ok = await onSave({
+        ...form,
+        requirements,
+        due_date: form.due_date || undefined,
+      });
+    } catch {
+      ok = false;
+    }
+
+    if (ok) {
+      setSaveState({ saving: false, saved: true });
+      window.setTimeout(() => onClose(), 900);
+    } else {
+      setSaveState({ saving: false, saved: false });
+    }
   };
 
   const PRIORITY_C = {
@@ -1134,8 +1151,20 @@ function TaskModal({ task, onClose, onSave, onRefresh, teamMembers, assignedByOp
             <button type="button" className="it-updates-btn it-updates-btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="it-updates-btn it-updates-btn-primary">
-              Save
+            <button
+              type="submit"
+              className="it-updates-btn it-updates-btn-primary"
+              disabled={saveState.saving || saveState.saved}
+              style={
+                saveState.saved
+                  ? {
+                      background: 'var(--clr-success)',
+                      boxShadow: '0 6px 20px rgba(16, 185, 129, 0.35)',
+                    }
+                  : undefined
+              }
+            >
+              {saveState.saved ? 'Saved' : saveState.saving ? 'Saving...' : 'Save'}
             </button>
           </div>
         </form>

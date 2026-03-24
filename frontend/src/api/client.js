@@ -2,6 +2,7 @@ import axios from 'axios';
 
 export const API_BASE_URL =
   import.meta.env.VITE_API_URL || 'https://status-tracking.onrender.com';
+  // import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -45,12 +46,14 @@ apiClient.interceptors.response.use(
         await requestRefreshToken();
         return apiClient(config);
       } catch (refreshError) {
-        // This app renders the login screen at `/` (no `/login` route on Netlify).
-        if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+        if (typeof window !== 'undefined') {
           localStorage.removeItem('user');
           localStorage.removeItem('username');
           localStorage.removeItem('profile_image');
-          window.location.href = '/';
+          window.dispatchEvent(new CustomEvent('auth:session-expired'));
+          if (window.location.pathname !== '/') {
+            window.location.href = '/';
+          }
         }
         return Promise.reject(refreshError);
       }

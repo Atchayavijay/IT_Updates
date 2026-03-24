@@ -16,16 +16,7 @@ const MODULES = [
 export default function MainLayout({ currentUser, onLogout }) {
   const [activeModule, setActiveModule] = useState('it_updates');
 
-  const user =
-    currentUser ||
-    (() => {
-      try {
-        const stored = localStorage.getItem('user');
-        return stored ? JSON.parse(stored) : null;
-      } catch {
-        return null;
-      }
-    })();
+  const user = currentUser;
 
   const userPermissions = user?.permissions || [];
 

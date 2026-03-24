@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import {
   MdLogout,
@@ -131,7 +131,7 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
   const visibleTabs = useMemo(() => TABS, []);
 
   const developers = useMemo(
-    () => teamOverview.filter((u) => u.is_it_developer || u.assignee),
+    () => teamOverview.filter((u) => Boolean(u.is_it_developer)),
     [teamOverview]
   );
   const managers = useMemo(
@@ -252,6 +252,11 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
     }));
   }, [dashboardData, projects]);
 
+  const projectLinks = useMemo(
+    () => (projects || []).filter((p) => Boolean((p.project_url || '').trim())),
+    [projects]
+  );
+
   const dashboardTaskGroups = useMemo(() => groupTasksByStatus(tasks), [tasks]);
   const myTaskGroups = useMemo(() => groupTasksByStatus(myTasks), [myTasks]);
 
@@ -289,23 +294,29 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
 
   const handleSaveProject = async (payload) => {
     try {
+      const body = {
+        name: payload.project_name ?? payload.name,
+        project_code: payload.project_code,
+        project_url: payload.project_url,
+        description: payload.description,
+        status: payload.status,
+        priority: payload.priority,
+        start_date: payload.start_date,
+        end_date: payload.end_date,
+        owner_user_id: payload.owner_user_id || null,
+        owner_name: payload.owner_name || null,
+        teammates: payload.teammates ?? [],
+      };
       if (projectModal.project?.id) {
-        await itUpdatesApi.updateProject(projectModal.project.id, payload);
+        await itUpdatesApi.updateProject(projectModal.project.id, body);
       } else {
-        await itUpdatesApi.createProject({
-          name: payload.project_name ?? payload.name,
-          project_code: payload.project_code,
-          description: payload.description,
-          status: payload.status,
-          priority: payload.priority,
-          start_date: payload.start_date,
-          end_date: payload.end_date,
-        });
+        await itUpdatesApi.createProject(body);
       }
-      closeProjectModal();
       loadAllData();
+      return true;
     } catch (e) {
       setError(e?.response?.data?.message || 'Failed to save project');
+      return false;
     }
   };
 
@@ -342,10 +353,11 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
           );
         }
       }
-      closeTaskModal();
       loadAllData();
+      return true;
     } catch (e) {
       setError(e?.response?.data?.message || 'Failed to save task');
+      return false;
     }
   };
 
@@ -628,6 +640,32 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
                   </div>
                 </div>
 
+                <div className="it-updates-panel it-updates-panel-full">
+                  <div className="it-updates-panel-header">
+                    <h2>Project Links</h2>
+                  </div>
+                  <div className="it-updates-project-links-list">
+                    {projectLinks.map((project) => (
+                      <div key={`link-${project.id ?? project.project_id}`} className="it-updates-project-link-row">
+                        <span className="it-updates-project-link-name">
+                          {project.name ?? project.project_name}
+                        </span>
+                        <a
+                          className="it-updates-project-link-url"
+                          href={project.project_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {project.project_url}
+                        </a>
+                      </div>
+                    ))}
+                    {!projectLinks.length && (
+                      <div className="it-updates-empty">No project URLs added yet.</div>
+                    )}
+                  </div>
+                </div>
+
                 {/* Team Activity moved to Admin dashboard */}
               </section>
             </>
@@ -765,6 +803,28 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
                     {project.project_code && (
                       <div className="it-updates-project-code">{project.project_code}</div>
                     )}
+                    {project.project_url && (
+                      <div className="it-updates-project-meta">
+                        <a
+                          href={project.project_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Open project URL
+                        </a>
+                      </div>
+                    )}
+                    <div className="it-updates-project-meta">
+                      <span>Owner: {project.owner_name ?? project.owner ?? 'Not set'}</span>
+                    </div>
+                    {(Array.isArray(project.teammates) && project.teammates.length > 0) || project.teammates_text ? (
+                      <div className="it-updates-project-meta">
+                        <span>
+                          Team: {Array.isArray(project.teammates) ? project.teammates.join(', ') : project.teammates_text}
+                        </span>
+                      </div>
+                    ) : null}
                     <div className="it-updates-project-meta">
                       <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                         <span
@@ -980,6 +1040,7 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
       {projectModal.open && (
         <ProjectModal
           project={projectModal.project}
+          teammatesOptions={developers}
           onClose={closeProjectModal}
           onSave={handleSaveProject}
         />
@@ -1007,20 +1068,60 @@ const ITUpdatesMain = ({ currentUser, onLogout }) => {
   );
 };
 
-function ProjectModal({ project, onClose, onSave }) {
+function ProjectModal({ project, teammatesOptions, onClose, onSave }) {
+  const initialTeammates = Array.isArray(project?.teammates)
+    ? project.teammates
+    : typeof project?.teammates_text === 'string'
+      ? project.teammates_text.split(',').map((v) => v.trim()).filter(Boolean)
+      : [];
+  const [isTeammatesOpen, setIsTeammatesOpen] = useState(false);
+  const teammatesDropdownRef = useRef(null);
+  const teammateChoices = useMemo(
+    () =>
+      [...new Set((teammatesOptions || []).map((u) => (u.username ?? u.assignee ?? '').trim()))]
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b)),
+    [teammatesOptions]
+  );
   const [form, setForm] = useState({
     project_name: project?.name ?? project?.project_name ?? '',
     project_code: project?.project_code ?? '',
+    project_url: project?.project_url ?? '',
     description: project?.description ?? '',
     status: project?.status ?? 'active',
     priority: project?.priority ?? 'medium',
     start_date: project?.start_date ? project.start_date.slice(0, 10) : '',
     end_date: project?.end_date ? project.end_date.slice(0, 10) : '',
+    owner_user_id: project?.owner_user_id ? String(project.owner_user_id) : '',
+    owner_name: project?.owner_name ?? project?.owner ?? '',
+    teammates: initialTeammates,
   });
+  const [saveState, setSaveState] = useState({ saving: false, saved: false });
 
-  const handleSubmit = (e) => {
+  useEffect(() => {
+    const onClickOutside = (event) => {
+      if (!teammatesDropdownRef.current) return;
+      if (!teammatesDropdownRef.current.contains(event.target)) {
+        setIsTeammatesOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    onSave(form);
+    if (saveState.saving) return;
+
+    setSaveState({ saving: true, saved: false });
+    const ok = await onSave(form);
+
+    if (ok) {
+      setSaveState({ saving: false, saved: true });
+      window.setTimeout(() => onClose(), 900);
+    } else {
+      setSaveState({ saving: false, saved: false });
+    }
   };
 
   return (
@@ -1049,12 +1150,123 @@ function ProjectModal({ project, onClose, onSave }) {
             />
           </label>
           <label>
+            Project URL
+            <input
+              type="url"
+              placeholder="https://example.com"
+              value={form.project_url}
+              onChange={(e) => setForm((f) => ({ ...f, project_url: e.target.value }))}
+            />
+          </label>
+          <label>
             Description
             <textarea
               value={form.description}
               onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
               rows={3}
             />
+          </label>
+          <label>
+            Project owner
+            <select
+              value={form.owner_user_id}
+              onChange={(e) => {
+                const selectedId = e.target.value;
+                const selectedUser = (teammatesOptions || []).find(
+                  (u) => String(u.user_id ?? '') === String(selectedId)
+                );
+                setForm((f) => ({
+                  ...f,
+                  owner_user_id: selectedId,
+                  owner_name: selectedUser?.username ?? selectedUser?.assignee ?? '',
+                }));
+              }}
+            >
+              <option value="">-- Select owner --</option>
+              {(teammatesOptions || []).map((u) => (
+                <option key={u.user_id ?? u.assignee} value={u.user_id ?? ''}>
+                  {u.username ?? u.assignee}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Teammates involved
+            <div className="it-updates-multi-select" ref={teammatesDropdownRef}>
+              <button
+                type="button"
+                className="it-updates-multi-select-trigger"
+                onClick={() => setIsTeammatesOpen((open) => !open)}
+              >
+                <div className="it-updates-multi-select-chips">
+                  {form.teammates.length === 0 && (
+                    <span className="it-updates-multi-select-placeholder">Select teammates</span>
+                  )}
+                  {form.teammates.map((name) => (
+                    <span key={`chip-${name}`} className="it-updates-multi-chip">
+                      {name}
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        className="it-updates-multi-chip-remove"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setForm((f) => ({
+                            ...f,
+                            teammates: f.teammates.filter((teammate) => teammate !== name),
+                          }));
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setForm((f) => ({
+                              ...f,
+                              teammates: f.teammates.filter((teammate) => teammate !== name),
+                            }));
+                          }
+                        }}
+                        aria-label={`Remove ${name}`}
+                      >
+                        x
+                      </span>
+                    </span>
+                  ))}
+                </div>
+                <span className="it-updates-multi-select-caret">▾</span>
+              </button>
+
+              {isTeammatesOpen && (
+                <div className="it-updates-multi-select-dropdown">
+                  <div className="it-updates-multi-select-header">Available teammates</div>
+                  <div className="it-updates-multi-select-list">
+                    {teammateChoices.map((name) => {
+                      const selected = form.teammates.includes(name);
+                      return (
+                        <label
+                          key={`option-${name}`}
+                          className={`it-updates-multi-select-option ${selected ? 'selected' : ''}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selected}
+                            onChange={() =>
+                              setForm((f) => ({
+                                ...f,
+                                teammates: selected
+                                  ? f.teammates.filter((teammate) => teammate !== name)
+                                  : [...f.teammates, name],
+                              }))
+                            }
+                          />
+                          <span>{name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </label>
           <label>
             Status
@@ -1100,8 +1312,20 @@ function ProjectModal({ project, onClose, onSave }) {
             <button type="button" className="it-updates-btn it-updates-btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="it-updates-btn it-updates-btn-primary">
-              Save
+            <button
+              type="submit"
+              className="it-updates-btn it-updates-btn-primary"
+              disabled={saveState.saving || saveState.saved}
+              style={
+                saveState.saved
+                  ? {
+                      background: 'var(--clr-success)',
+                      boxShadow: '0 6px 20px rgba(16, 185, 129, 0.35)',
+                    }
+                  : undefined
+              }
+            >
+              {saveState.saved ? 'Saved' : saveState.saving ? 'Saving...' : 'Save'}
             </button>
           </div>
         </form>
@@ -1137,6 +1361,7 @@ function TaskModal({ task, projects, developers, managers, onClose, onSave, onRe
   });
 
   const isExistingTask = Boolean(task?.id);
+  const [saveState, setSaveState] = useState({ saving: false, saved: false });
 
   // Load requirements when modal opens for existing task
   useEffect(() => {
@@ -1320,14 +1545,29 @@ function TaskModal({ task, projects, developers, managers, onClose, onSave, onRe
     setShowAddReq(true);
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    onSave({
-      ...form,
-      requirements, // Pass local requirements to the save handler
-      projectId: form.project_id || undefined,
-      due_date: form.due_date || undefined,
-    });
+    if (saveState.saving) return;
+
+    setSaveState({ saving: true, saved: false });
+    let ok = false;
+    try {
+      ok = await onSave({
+        ...form,
+        requirements, // Pass local requirements to the save handler
+        projectId: form.project_id || undefined,
+        due_date: form.due_date || undefined,
+      });
+    } catch {
+      ok = false;
+    }
+
+    if (ok) {
+      setSaveState({ saving: false, saved: true });
+      window.setTimeout(() => onClose(), 900);
+    } else {
+      setSaveState({ saving: false, saved: false });
+    }
   };
 
   const REQ_STATUS_COLORS = {
@@ -1620,8 +1860,20 @@ function TaskModal({ task, projects, developers, managers, onClose, onSave, onRe
             <button type="button" className="it-updates-btn it-updates-btn-secondary" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="it-updates-btn it-updates-btn-primary">
-              Save
+            <button
+              type="submit"
+              className="it-updates-btn it-updates-btn-primary"
+              disabled={saveState.saving || saveState.saved}
+              style={
+                saveState.saved
+                  ? {
+                      background: 'var(--clr-success)',
+                      boxShadow: '0 6px 20px rgba(16, 185, 129, 0.35)',
+                    }
+                  : undefined
+              }
+            >
+              {saveState.saved ? 'Saved' : saveState.saving ? 'Saving...' : 'Save'}
             </button>
           </div>
         </form>

@@ -7,6 +7,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const toNullableDate = (val) => (val === '' || val === undefined ? null : val);
+const toNullableInt = (val) => {
+  if (val === '' || val === undefined || val === null) return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+const normalizeTeammatesInput = (val) => {
+  if (Array.isArray(val)) {
+    return [...new Set(val.map((v) => String(v || '').trim()).filter(Boolean))];
+  }
+  if (typeof val === 'string') {
+    return [...new Set(val.split(',').map((v) => v.trim()).filter(Boolean))];
+  }
+  return [];
+};
+const teammatesToText = (val) => normalizeTeammatesInput(val).join(', ');
+const teammatesFromText = (val) => normalizeTeammatesInput(val);
 
 const { Pool } = pg;
 
@@ -217,6 +233,19 @@ export async function dbEnsureTables() {
   const p = getPool();
   if (!p) return;
 
+  // Keep project fields in sync for ownership + teammates.
+  try {
+    await p.query(`
+      ALTER TABLE it_projects
+      ADD COLUMN IF NOT EXISTS owner_user_id INT,
+      ADD COLUMN IF NOT EXISTS owner_name VARCHAR(200),
+      ADD COLUMN IF NOT EXISTS teammates TEXT,
+      ADD COLUMN IF NOT EXISTS project_url TEXT;
+    `);
+  } catch (err) {
+    console.warn('dbEnsureTables: project ownership columns check failed:', err.message);
+  }
+
   // If base tables aren't present yet (e.g. `it_tasks`), creating a FK table will fail.
   // This is a symptom that `schema.sql` / migrations weren't applied to the DB.
   let hasItTasks = false;
@@ -323,12 +352,17 @@ export async function dbGetProjects(status = null) {
         name: r.project_name,
         project_name: r.project_name,
         project_code: r.project_code,
+        project_url: r.project_url || '',
         description: r.description,
         status: r.status,
         priority: r.priority,
         start_date: r.start_date,
         end_date: r.end_date,
-        owner: 'IT Team',
+        owner: r.owner_name || 'IT Team',
+        owner_name: r.owner_name || 'IT Team',
+        owner_user_id: r.owner_user_id ?? null,
+        teammates: teammatesFromText(r.teammates),
+        teammates_text: r.teammates || '',
         progress: progressMap[r.project_id] ?? 0,
         total_tasks: counts.total,
         completed_tasks: counts.completed,
@@ -347,17 +381,23 @@ export async function dbCreateProject(data) {
   const {
     rows: [row],
   } = await p.query(
-    `INSERT INTO it_projects (project_name, project_code, description, status, priority, start_date, end_date)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO it_projects (
+      project_name, project_code, project_url, description, status, priority, start_date, end_date, owner_user_id, owner_name, teammates
+    )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
     [
       data.name ?? data.project_name ?? 'Untitled Project',
       data.project_code ?? null,
+      data.project_url ?? null,
       data.description ?? null,
       data.status ?? 'active',
       data.priority ?? 'medium',
       toNullableDate(data.start_date),
       toNullableDate(data.end_date),
+      toNullableInt(data.owner_user_id),
+      data.owner_name ?? data.owner ?? null,
+      teammatesToText(data.teammates ?? data.teammates_text),
     ]
   );
   if (!row) return null;
@@ -365,12 +405,17 @@ export async function dbCreateProject(data) {
     id: String(row.project_id),
     name: row.project_name,
     project_code: row.project_code,
+    project_url: row.project_url || '',
     description: row.description,
     status: row.status,
     priority: row.priority,
     start_date: row.start_date,
     end_date: row.end_date,
-    owner: 'IT Team',
+    owner: row.owner_name || 'IT Team',
+    owner_name: row.owner_name || 'IT Team',
+    owner_user_id: row.owner_user_id ?? null,
+    teammates: teammatesFromText(row.teammates),
+    teammates_text: row.teammates || '',
     progress: 0,
   };
 }
@@ -381,22 +426,33 @@ export async function dbUpdateProject(projectId, data) {
   const allowed = [
     'project_name',
     'project_code',
+    'project_url',
     'description',
     'status',
     'priority',
     'start_date',
     'end_date',
+    'owner_user_id',
+    'owner_name',
+    'teammates',
   ];
   const updates = [];
   const values = [];
   let i = 1;
   for (const [k, v] of Object.entries(data)) {
-    const col = k === 'name' ? 'project_name' : k;
+    let col = k === 'name' ? 'project_name' : k;
+    if (col === 'owner') col = 'owner_name';
+    if (col === 'teammates_text') col = 'teammates';
     if (allowed.includes(col) && v !== undefined) {
       updates.push(`${col} = $${i}`);
-      const val = (col === 'start_date' || col === 'end_date' || col === 'due_date' || col === 'task_date')
-        ? toNullableDate(v)
-        : v;
+      const val =
+        col === 'start_date' || col === 'end_date' || col === 'due_date' || col === 'task_date'
+          ? toNullableDate(v)
+          : col === 'owner_user_id'
+            ? toNullableInt(v)
+            : col === 'teammates'
+              ? teammatesToText(v)
+              : v;
       values.push(val);
       i++;
     }
@@ -414,12 +470,17 @@ export async function dbUpdateProject(projectId, data) {
     id: String(row.project_id),
     name: row.project_name,
     project_code: row.project_code,
+    project_url: row.project_url || '',
     description: row.description,
     status: row.status,
     priority: row.priority,
     start_date: row.start_date,
     end_date: row.end_date,
-    owner: 'IT Team',
+    owner: row.owner_name || 'IT Team',
+    owner_name: row.owner_name || 'IT Team',
+    owner_user_id: row.owner_user_id ?? null,
+    teammates: teammatesFromText(row.teammates),
+    teammates_text: row.teammates || '',
     progress: 0,
   };
 }
@@ -436,12 +497,17 @@ export async function dbGetProjectById(projectId) {
     id: String(row.project_id),
     name: row.project_name,
     project_code: row.project_code,
+    project_url: row.project_url || '',
     description: row.description,
     status: row.status,
     priority: row.priority,
     start_date: row.start_date,
     end_date: row.end_date,
-    owner: 'IT Team',
+    owner: row.owner_name || 'IT Team',
+    owner_name: row.owner_name || 'IT Team',
+    owner_user_id: row.owner_user_id ?? null,
+    teammates: teammatesFromText(row.teammates),
+    teammates_text: row.teammates || '',
     progress: 0,
   };
 }

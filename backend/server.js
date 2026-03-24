@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import * as db from './db/index.js';
 import { requireAuth, attachUserPermissions, requirePermission, signAccessToken, signRefreshToken, verifyRefreshToken } from './middlewares/authMiddleware.js';
 
@@ -38,6 +39,7 @@ function normalizeOrigin(value) {
 
 function getAllowedOrigins() {
   const raw = process.env.CLIENT_ORIGIN || 'https://status-track.netlify.app';
+  // const raw = process.env.CLIENT_ORIGIN || 'http://localhost:5174';
   return raw
     .split(',')
     .map((part) => normalizeOrigin(part))
@@ -46,21 +48,25 @@ function getAllowedOrigins() {
 
 const allowedOrigins = getAllowedOrigins();
 
+const corsOptions = {
+  origin(origin, callback) {
+    // Non-browser requests may not have an Origin header.
+    if (!origin) return callback(null, true);
+
+    const normalized = normalizeOrigin(origin);
+    if (allowedOrigins.includes(normalized)) return callback(null, true);
+
+    console.warn('CORS rejected Origin:', origin, '| allowed:', allowedOrigins.join(', '));
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+};
+
 app.use(
-  cors({
-    origin(origin, callback) {
-      // Non-browser requests may not have an Origin header.
-      if (!origin) return callback(null, true);
-
-      const normalized = normalizeOrigin(origin);
-      if (allowedOrigins.includes(normalized)) return callback(null, true);
-
-      console.warn('CORS rejected Origin:', origin, '| allowed:', allowedOrigins.join(', '));
-      callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-  })
+  cors(corsOptions)
 );
+
+// NOTE: CORS middleware above handles preflight requests; no extra OPTIONS route needed.
 
 app.use(express.json());
 app.use(cookieParser());
@@ -112,6 +118,37 @@ let commentsByTaskId = {
 
 const makeId = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
 
+async function buildUserFromDbUser(dbUser) {
+  const user = {
+    id: String(dbUser.user_id),
+    user_id: dbUser.user_id,
+    name: dbUser.username,
+    username: dbUser.username,
+    email: dbUser.email,
+    is_it_developer: Boolean(dbUser.is_it_developer),
+    is_it_manager: Boolean(dbUser.is_it_manager),
+  };
+  try {
+    user.permissions = await db.dbGetUserPermissionsOrLegacy(dbUser.user_id);
+    user.roleIds = await db.dbGetUserRoleIds(dbUser.user_id);
+  } catch (_) {
+    user.permissions = [];
+    user.roleIds = [];
+  }
+  const perms = user.permissions || [];
+  if (perms.includes('admin.access')) user.role = 'Admin';
+  else if (user.is_it_manager || perms.includes('it_updates.users')) user.role = 'IT Manager';
+  else if (user.is_it_developer || (perms.includes('it_updates.manage') && perms.includes('it_updates.view')))
+    user.role = 'IT Developer';
+  else if (perms.includes('consultants.view') || perms.includes('consultants.manage')) user.role = 'Consultant';
+  else if (perms.includes('digital_marketing.view') || perms.includes('digital_marketing.manage'))
+    user.role = 'Digital Marketing';
+  else user.role = 'User';
+  return user;
+}
+
+const asyncMw = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
 // ---- Auth: login + refresh (JWT cookie-based). DB users only when DB connected. ----
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
@@ -133,31 +170,7 @@ app.post('/auth/login', async (req, res) => {
       console.warn('Login failed: wrong password for user', dbUser.username);
       return res.status(401).json({ message: 'Invalid email/username or password' });
     }
-    const user = {
-      id: String(dbUser.user_id),
-      user_id: dbUser.user_id,
-      name: dbUser.username,
-      username: dbUser.username,
-      email: dbUser.email,
-      is_it_developer: Boolean(dbUser.is_it_developer),
-      is_it_manager: Boolean(dbUser.is_it_manager),
-    };
-    try {
-      user.permissions = await db.dbGetUserPermissionsOrLegacy(dbUser.user_id);
-      user.roleIds = await db.dbGetUserRoleIds(dbUser.user_id);
-    } catch (_) {
-      user.permissions = [];
-      user.roleIds = [];
-    }
-    const perms = user.permissions || [];
-    if (perms.includes('admin.access')) user.role = 'Admin';
-    else if (user.is_it_manager || perms.includes('it_updates.users')) user.role = 'IT Manager';
-    else if (user.is_it_developer || (perms.includes('it_updates.manage') && perms.includes('it_updates.view')))
-      user.role = 'IT Developer';
-    else if (perms.includes('consultants.view') || perms.includes('consultants.manage')) user.role = 'Consultant';
-    else if (perms.includes('digital_marketing.view') || perms.includes('digital_marketing.manage'))
-      user.role = 'Digital Marketing';
-    else user.role = 'User';
+    const user = await buildUserFromDbUser(dbUser);
     const payload = { id: user.id, email: user.email };
     const access = signAccessToken(payload);
     const refresh = signRefreshToken(payload);
@@ -189,6 +202,53 @@ app.post('/auth/login', async (req, res) => {
   res.json({ user: safeUser });
 });
 
+/** Current session (cookies). Used on app load — do not trust localStorage alone. */
+app.get('/auth/me', asyncMw(async (req, res) => {
+  const JWT_SECRET = process.env.JWT_SECRET;
+
+  if (!JWT_SECRET) {
+    const token = req.cookies?.access_token;
+    if (!token) return res.status(401).json({ message: 'Not authenticated' });
+    const u = users[0];
+    const { password: _pw, ...safeUser } = u;
+    safeUser.permissions = ['it_updates.view', 'it_updates.manage', 'it_updates.users', 'admin.access'];
+    safeUser.roleIds = [];
+    return res.json({ user: safeUser });
+  }
+
+  const token = req.cookies?.access_token;
+  if (!token) return res.status(401).json({ message: 'Not authenticated' });
+
+  if (token === 'demo-token') {
+    const u = users[0];
+    const { password: _pw, ...safeUser } = u;
+    safeUser.permissions = ['it_updates.view', 'it_updates.manage', 'it_updates.users', 'admin.access'];
+    safeUser.roleIds = [];
+    return res.json({ user: safeUser });
+  }
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(401).json({ message: 'Invalid or expired token' });
+  }
+
+  if (db.useDb()) {
+    const dbUser = await db.dbGetUserById(decoded.id);
+    if (!dbUser) return res.status(401).json({ message: 'User not found' });
+    const user = await buildUserFromDbUser(dbUser);
+    return res.json({ user });
+  }
+
+  const u = users.find((x) => x.id === decoded.id);
+  if (!u) return res.status(401).json({ message: 'User not found' });
+  const { password: _pw, ...safeUser } = u;
+  safeUser.permissions = ['it_updates.view', 'it_updates.manage', 'it_updates.users', 'admin.access'];
+  safeUser.roleIds = [];
+  res.json({ user: safeUser });
+}));
+
 app.post('/auth/refresh', (req, res) => {
   const token = req.cookies?.refresh_token;
   if (!token) return res.status(401).json({ message: 'Refresh token required' });
@@ -218,9 +278,6 @@ app.post('/auth/refresh-token', (req, res) => {
   res.cookie('access_token', 'demo-token', COOKIE_OPTS);
   res.json({ success: true });
 });
-
-// Async middleware wrapper for Express
-const asyncMw = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 // ---- IT Updates API (JWT auth; any authenticated user can access — attach permissions for UI) ----
 const BASE_PATH = '/api/it-updates';
@@ -259,7 +316,10 @@ app.post(`${BASE_PATH}/projects`, async (req, res) => {
       id: makeId('p'),
       name: req.body.name ?? req.body.project_name ?? 'Untitled Project',
       status: req.body.status ?? 'active',
-      owner: req.body.owner ?? 'IT Team',
+      owner: req.body.owner_name ?? req.body.owner ?? 'IT Team',
+      owner_name: req.body.owner_name ?? req.body.owner ?? 'IT Team',
+      owner_user_id: req.body.owner_user_id ?? null,
+      teammates: Array.isArray(req.body.teammates) ? req.body.teammates : [],
       progress: req.body.progress ?? 0,
       ...req.body,
     };
