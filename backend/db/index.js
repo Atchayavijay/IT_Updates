@@ -1220,6 +1220,18 @@ export async function dbGetTeamOverview(team = null) {
       `
         SELECT u.user_id, COALESCE(u.username, u.email) AS username, u.profile_image,
                u.is_it_developer, u.is_it_manager,
+               EXISTS (
+                 SELECT 1
+                 FROM user_roles ur_dev
+                 JOIN roles r_dev ON r_dev.role_id = ur_dev.role_id
+                 WHERE ur_dev.user_id = u.user_id AND r_dev.code = 'it_developer'
+               ) AS rbac_it_developer,
+               EXISTS (
+                 SELECT 1
+                 FROM user_roles ur_mgr
+                 JOIN roles r_mgr ON r_mgr.role_id = ur_mgr.role_id
+                 WHERE ur_mgr.user_id = u.user_id AND r_mgr.code IN ('it_manager', 'admin')
+               ) AS rbac_it_manager,
                COUNT(t.task_id) AS total_tasks,
                COUNT(t.task_id) FILTER (WHERE t.status = 'completed') AS completed_tasks,
                COUNT(t.task_id) FILTER (WHERE t.status IN ('todo', 'in_progress', 'review', 'rework')) AS in_progress_tasks
@@ -1235,8 +1247,10 @@ export async function dbGetTeamOverview(team = null) {
       user_id: r.user_id,
       username: r.username,
       profile_image: r.profile_image,
-      is_it_developer: Boolean(r.is_it_developer),
-      is_it_manager: Boolean(r.is_it_manager),
+      // IT dashboard "Assign to" / developers list uses is_it_developer; RBAC-only IT Developer
+      // must count too (admin "Assign roles" does not always set users.is_it_developer).
+      is_it_developer: Boolean(r.is_it_developer) || Boolean(r.rbac_it_developer),
+      is_it_manager: Boolean(r.is_it_manager) || Boolean(r.rbac_it_manager),
       total_tasks: Number(r.total_tasks ?? 0),
       completed_tasks: Number(r.completed_tasks ?? 0),
       in_progress_tasks: Number(r.in_progress_tasks ?? 0),
